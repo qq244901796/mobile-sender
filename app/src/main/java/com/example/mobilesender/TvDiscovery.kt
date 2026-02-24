@@ -3,6 +3,7 @@
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import com.example.mobilesender.protocol.ProtocolType
 
 class TvDiscovery(
     context: Context,
@@ -26,10 +27,13 @@ class TvDiscovery(
 
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
                         val host = resolved.host?.hostAddress ?: return
+                        val id = "custom-${resolved.serviceName}-${host}:${resolved.port}"
                         val device = TvDevice(
-                            name = resolved.serviceName ?: "Unknown",
+                            id = id,
+                            name = resolved.serviceName ?: "Custom TV",
                             host = host,
                             port = resolved.port,
+                            protocol = ProtocolType.CUSTOM,
                             raw = resolved
                         )
                         onResolved(device)

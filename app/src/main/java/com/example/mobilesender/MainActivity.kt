@@ -12,17 +12,25 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.example.mobilesender.discovery.DeviceDiscoveryManager
+import com.example.mobilesender.protocol.ProtocolType
+import com.example.mobilesender.sender.PlaybackAction
+import com.example.mobilesender.sender.UnifiedPlaybackController
+import com.example.mobilesender.sender.UnifiedVideoSender
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var selectedDeviceText: TextView
     private lateinit var resultText: TextView
+    private lateinit var controlHintText: TextView
     private lateinit var linkInput: EditText
     private lateinit var h5Input: AutoCompleteTextView
 
-    private lateinit var discovery: TvDiscovery
+    private lateinit var discoveryManager: DeviceDiscoveryManager
     private lateinit var adapter: DeviceAdapter
+    private val unifiedSender = UnifiedVideoSender()
+    private val unifiedPlaybackController = UnifiedPlaybackController()
 
     private val devices = linkedMapOf<String, TvDevice>()
     private var selectedDevice: TvDevice? = null
@@ -40,23 +48,25 @@ class MainActivity : AppCompatActivity() {
 
         selectedDeviceText = findViewById(R.id.selectedDeviceText)
         resultText = findViewById(R.id.resultText)
+        controlHintText = findViewById(R.id.controlHintText)
         linkInput = findViewById(R.id.linkInput)
         h5Input = findViewById(R.id.h5Input)
 
         bindHistoryInput()
+        updateControlHint(null)
 
         val recycler = findViewById<RecyclerView>(R.id.deviceRecycler)
         recycler.layoutManager = LinearLayoutManager(this)
         adapter = DeviceAdapter { device ->
             selectedDevice = device
-            selectedDeviceText.text = "已选电视: ${device.name} (${device.host}:${device.port})"
+            selectedDeviceText.text = "已选设备: [${device.protocol.displayName}] ${device.name}"
+            updateControlHint(device)
         }
         recycler.adapter = adapter
 
-        discovery = TvDiscovery(this) { device ->
-            val key = "${device.host}:${device.port}"
-            if (!devices.containsKey(key)) {
-                devices[key] = device
+        discoveryManager = DeviceDiscoveryManager(this) { device ->
+            if (!devices.containsKey(device.id)) {
+                devices[device.id] = device
                 runOnUiThread { adapter.submit(devices.values.toList()) }
             }
         }
@@ -64,8 +74,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.discoverButton).setOnClickListener {
             devices.clear()
             adapter.submit(emptyList())
-            resultText.text = "状态：正在扫描电视..."
-            discovery.start()
+            resultText.text = "状态：正在扫描设备（自定义 + DLNA）..."
+            discoveryManager.start()
         }
 
         findViewById<Button>(R.id.sendLinkButton).setOnClickListener {
@@ -79,6 +89,16 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.selectFileButton).setOnClickListener {
             filePicker.launch(arrayOf("video/*"))
+        }
+
+        findViewById<Button>(R.id.playControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.PLAY)
+        }
+        findViewById<Button>(R.id.pauseControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.PAUSE)
+        }
+        findViewById<Button>(R.id.stopControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.STOP)
         }
 
         findViewById<Button>(R.id.openH5Button).setOnClickListener {
@@ -98,6 +118,14 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun updateControlHint(device: TvDevice?) {
+        controlHintText.text = when (device?.protocol) {
+            ProtocolType.CUSTOM -> "控制能力：完整控制（播放/暂停/退出播放）"
+            ProtocolType.DLNA -> "控制能力：基础控制（播放/暂停/停止，兼容性依电视）"
+            null -> "控制能力：未选择设备"
+        }
+    }
+
     private fun openH5Page() {
         val input = h5Input.text.toString().trim()
         val defaultUrl = "https://www.bilibili.com"
@@ -107,22 +135,26 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, WebCastActivity::class.java).apply {
             putExtra(WebCastActivity.EXTRA_INITIAL_URL, pageUrl)
             selectedDevice?.let { tv ->
+                putExtra(WebCastActivity.EXTRA_TV_ID, tv.id)
                 putExtra(WebCastActivity.EXTRA_TV_NAME, tv.name)
                 putExtra(WebCastActivity.EXTRA_TV_HOST, tv.host)
                 putExtra(WebCastActivity.EXTRA_TV_PORT, tv.port)
+                putExtra(WebCastActivity.EXTRA_TV_PROTOCOL, tv.protocol.name)
+                putExtra(WebCastActivity.EXTRA_TV_LOCATION, tv.locationUrl)
+                putExtra(WebCastActivity.EXTRA_TV_CONTROL_URL, tv.avTransportControlUrl)
             }
         }
         startActivity(intent)
 
         if (selectedDevice == null) {
-            resultText.text = "状态：已打开H5，网页内可直接扫描并绑定电视"
+            resultText.text = "状态：已打开H5，网页内可直接扫描并绑定设备"
         }
     }
 
     private fun sendLocalFile(uri: Uri) {
         val tv = selectedDevice
         if (tv == null) {
-            resultText.text = "状态：请先选择电视设备"
+            resultText.text = "状态：请先选择设备"
             return
         }
 
@@ -145,18 +177,39 @@ class MainActivity : AppCompatActivity() {
     private fun sendToTv(videoUrl: String) {
         val tv = selectedDevice
         if (tv == null) {
-            resultText.text = "状态：请先选择电视设备"
+            resultText.text = "状态：请先选择设备"
             return
         }
 
         resultText.text = "状态：发送中..."
         thread {
-            val (ok, msg) = CastClient.sendCast(tv, videoUrl)
+            val (ok, msg) = unifiedSender.send(tv, videoUrl)
             runOnUiThread {
                 resultText.text = if (ok) {
                     "状态：发送成功 ($msg)"
                 } else {
                     "状态：发送失败 ($msg)"
+                }
+            }
+        }
+    }
+
+    private fun controlPlayback(action: PlaybackAction) {
+        val tv = selectedDevice
+        if (tv == null) {
+            resultText.text = "状态：请先选择设备"
+            return
+        }
+
+        resultText.text = "状态：控制中..."
+        thread {
+            val (ok, msg) = unifiedPlaybackController.control(tv, action)
+            runOnUiThread {
+                resultText.text = if (ok) {
+                    "状态：控制成功 (${action.name})"
+                } else {
+                    val suffix = if (tv.protocol == ProtocolType.DLNA) "（该电视可能不支持此控制）" else ""
+                    "状态：控制失败 ($msg)$suffix"
                 }
             }
         }
@@ -168,7 +221,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        discovery.stop()
+        discoveryManager.stop()
         fileShareServer?.stop()
     }
 }

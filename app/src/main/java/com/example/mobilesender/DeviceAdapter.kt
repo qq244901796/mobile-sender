@@ -25,7 +25,7 @@ class DeviceAdapter(
 
     override fun onBindViewHolder(holder: DeviceVH, position: Int) {
         val device = items[position]
-        holder.text.text = "${device.name} (${device.host}:${device.port})"
+        holder.text.text = "[${device.protocol.displayName}] ${device.name} (${device.host}:${device.port})"
         holder.itemView.setOnClickListener { onClick(device) }
     }
 

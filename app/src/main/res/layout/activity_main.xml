@@ -52,6 +52,44 @@
             android:layout_marginTop="8dp"
             android:text="选择本地视频并发送" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/playControlButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="播放" />
+
+            <Button
+                android:id="@+id/pauseControlButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_weight="1"
+                android:text="暂停" />
+
+            <Button
+                android:id="@+id/stopControlButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_weight="1"
+                android:text="退出播放" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/controlHintText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="控制能力：未选择设备"
+            android:textSize="12sp" />
+
         <AutoCompleteTextView
             android:id="@+id/h5Input"
             android:layout_width="match_parent"

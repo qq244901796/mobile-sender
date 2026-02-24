@@ -19,6 +19,11 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.example.mobilesender.discovery.DeviceDiscoveryManager
+import com.example.mobilesender.protocol.ProtocolType
+import com.example.mobilesender.sender.PlaybackAction
+import com.example.mobilesender.sender.UnifiedPlaybackController
+import com.example.mobilesender.sender.UnifiedVideoSender
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.concurrent.thread
@@ -34,11 +39,13 @@ class WebCastActivity : AppCompatActivity() {
     private var targetTv: TvDevice? = null
     private val uiHandler = Handler(Looper.getMainLooper())
     private var lastHasPlayingState: Boolean? = null
+    private val unifiedSender = UnifiedVideoSender()
+    private val unifiedPlaybackController = UnifiedPlaybackController()
 
     @Volatile
     private var lastMediaUrlFromNetwork: String? = null
 
-    private lateinit var discovery: TvDiscovery
+    private lateinit var discoveryManager: DeviceDiscoveryManager
     private val foundDevices = linkedMapOf<String, TvDevice>()
     private var pendingSendAfterBind = false
 
@@ -63,19 +70,7 @@ class WebCastActivity : AppCompatActivity() {
         bindHistoryInput()
         setupDiscovery()
 
-        val tvHost = intent.getStringExtra(EXTRA_TV_HOST)
-        val tvPort = intent.getIntExtra(EXTRA_TV_PORT, -1)
-        val tvName = intent.getStringExtra(EXTRA_TV_NAME).orEmpty()
-        if (!tvHost.isNullOrBlank() && tvPort > 0) {
-            targetTv = TvDevice(
-                name = if (tvName.isBlank()) "TV" else tvName,
-                host = tvHost,
-                port = tvPort
-            )
-            webStatusText.text = "状态：已连接电视 ${targetTv?.name}，打开网页后可发送"
-        } else {
-            webStatusText.text = "状态：未绑定电视，点击“扫描电视”后可直接投屏"
-        }
+        restoreDeviceFromIntent()
         updateCurrentTvText()
 
         setupWebView()
@@ -107,6 +102,15 @@ class WebCastActivity : AppCompatActivity() {
         findViewById<Button>(R.id.sendWebVideoButton).setOnClickListener {
             sendCurrentWebVideoToTv()
         }
+        findViewById<Button>(R.id.webPlayControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.PLAY)
+        }
+        findViewById<Button>(R.id.webPauseControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.PAUSE)
+        }
+        findViewById<Button>(R.id.webStopControlButton).setOnClickListener {
+            controlPlayback(PlaybackAction.STOP)
+        }
 
         floatingCastButton.setOnClickListener {
             sendCurrentWebVideoToTv()
@@ -118,7 +122,7 @@ class WebCastActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         uiHandler.removeCallbacks(videoDetectTicker)
-        discovery.stop()
+        discoveryManager.stop()
         webView.destroy()
     }
 
@@ -130,38 +134,60 @@ class WebCastActivity : AppCompatActivity() {
     }
 
     private fun setupDiscovery() {
-        discovery = TvDiscovery(this) { device ->
-            val key = "${device.host}:${device.port}"
-            if (!foundDevices.containsKey(key)) {
-                foundDevices[key] = device
+        discoveryManager = DeviceDiscoveryManager(this) { device ->
+            if (!foundDevices.containsKey(device.id)) {
+                foundDevices[device.id] = device
             }
         }
+    }
+
+    private fun restoreDeviceFromIntent() {
+        val host = intent.getStringExtra(EXTRA_TV_HOST)
+        val port = intent.getIntExtra(EXTRA_TV_PORT, -1)
+        if (host.isNullOrBlank() || port <= 0) {
+            webStatusText.text = "状态：未绑定设备，点击“扫描电视”后可直接投屏"
+            return
+        }
+        val protocol = runCatching {
+            ProtocolType.valueOf(intent.getStringExtra(EXTRA_TV_PROTOCOL).orEmpty())
+        }.getOrElse { ProtocolType.CUSTOM }
+
+        targetTv = TvDevice(
+            id = intent.getStringExtra(EXTRA_TV_ID) ?: "${protocol.name.lowercase()}-$host:$port",
+            name = intent.getStringExtra(EXTRA_TV_NAME) ?: "TV",
+            host = host,
+            port = port,
+            protocol = protocol,
+            locationUrl = intent.getStringExtra(EXTRA_TV_LOCATION),
+            avTransportControlUrl = intent.getStringExtra(EXTRA_TV_CONTROL_URL)
+        )
+        webStatusText.text = "状态：已连接设备 ${targetTv?.name}，打开网页后可发送"
     }
 
     private fun startDiscovery(manual: Boolean) {
         foundDevices.clear()
-        discovery.stop()
-        discovery.start()
-        webStatusText.text = "状态：正在扫描电视设备..."
+        discoveryManager.stop()
+        discoveryManager.start()
+        webStatusText.text = "状态：正在扫描设备（自定义 + DLNA）..."
         uiHandler.postDelayed({
             val list = foundDevices.values.toList()
             if (list.isEmpty()) {
                 pendingSendAfterBind = false
-                webStatusText.text = "状态：未发现电视，请确认同一局域网"
+                webStatusText.text = "状态：未发现设备，请确认同一局域网"
             } else {
                 showDevicePicker(list)
             }
-        }, 1800)
+        }, 2200)
 
         if (manual) {
-            Log.i(TAG, "manual tv discovery started")
+            Log.i(TAG, "manual discovery started")
         }
     }
 
     private fun showDevicePicker(list: List<TvDevice>) {
-        val labels = list.map { "${it.name} (${it.host}:${it.port})" }.toTypedArray()
+        val labels = list.map { "[${it.protocol.displayName}] ${it.name} (${it.host}:${it.port})" }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("选择电视设备")
+            .setTitle("选择投屏设备")
             .setItems(labels) { _, which ->
                 targetTv = list[which]
                 updateCurrentTvText()
@@ -178,9 +204,9 @@ class WebCastActivity : AppCompatActivity() {
     private fun updateCurrentTvText() {
         val tv = targetTv
         currentTvText.text = if (tv == null) {
-            "当前电视：未绑定"
+            "当前设备：未绑定"
         } else {
-            "当前电视：${tv.name}"
+            "当前设备：[${tv.protocol.displayName}] ${tv.name}"
         }
     }
 
@@ -222,7 +248,7 @@ class WebCastActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (targetTv != null) {
-                    webStatusText.text = "状态：网页已加载，播放视频后可发送到电视"
+                    webStatusText.text = "状态：网页已加载，播放视频后可发送"
                 }
                 Log.i(TAG, "onPageFinished url=$url")
             }
@@ -258,19 +284,13 @@ class WebCastActivity : AppCompatActivity() {
         webView.evaluateJavascript(JS_HAS_PLAYING_VIDEO) { jsValue ->
             val json = decodeJsJson(jsValue)
             val hasPlaying = json?.optBoolean("hasPlaying") == true
-            val videoCount = json?.optInt("videoCount") ?: -1
-            val playingCount = json?.optInt("playingCount") ?: -1
             val fallbackReady = !lastMediaUrlFromNetwork.isNullOrBlank()
-
             val show = hasPlaying || fallbackReady
             floatingCastButton.visibility = if (show) View.VISIBLE else View.GONE
 
             if (lastHasPlayingState != show) {
                 lastHasPlayingState = show
-                Log.i(
-                    TAG,
-                    "detect stateChanged show=$show hasPlaying=$hasPlaying fallbackReady=$fallbackReady videoCount=$videoCount playingCount=$playingCount url=${webView.url}"
-                )
+                Log.i(TAG, "detect stateChanged show=$show url=${webView.url}")
             }
         }
     }
@@ -286,28 +306,9 @@ class WebCastActivity : AppCompatActivity() {
         webStatusText.text = "状态：正在获取网页视频地址..."
         webView.evaluateJavascript(JS_FIND_VIDEO_URL) { jsValue ->
             val result = decodeJsJson(jsValue)
-            if (result == null) {
-                val fallback = lastMediaUrlFromNetwork
-                if (!fallback.isNullOrBlank()) {
-                    Log.i(TAG, "send parse failed, use fallback=$fallback")
-                    sendUrlToTv(tv, fallback)
-                } else {
-                    webStatusText.text = "状态：脚本返回异常，请查看日志"
-                    Log.e(TAG, "send parse failed raw=$jsValue")
-                }
-                return@evaluateJavascript
-            }
-
-            val found = result.optBoolean("found", false)
-            val videoUrl = result.optString("url", "").trim()
-            val reason = result.optString("reason", "")
-            val videoCount = result.optInt("videoCount", -1)
-            val playingCount = result.optInt("playingCount", -1)
-
-            Log.i(
-                TAG,
-                "send probe found=$found videoCount=$videoCount playingCount=$playingCount reason=$reason page=${webView.url} payload=$result"
-            )
+            val found = result?.optBoolean("found", false) == true
+            val videoUrl = result?.optString("url", "").orEmpty().trim()
+            val reason = result?.optString("reason", "unknown").orEmpty()
 
             val finalUrl = when {
                 found && videoUrl.isNotBlank() -> videoUrl
@@ -316,30 +317,42 @@ class WebCastActivity : AppCompatActivity() {
             }
 
             if (finalUrl.isBlank()) {
-                webStatusText.text = "状态：未找到可发送的视频($reason)，请看日志"
+                webStatusText.text = "状态：未找到可发送的视频($reason)"
                 return@evaluateJavascript
             }
 
-            if (!found) {
-                Log.i(TAG, "send use fallback media url=$finalUrl")
-            }
             sendUrlToTv(tv, finalUrl)
         }
     }
 
     private fun sendUrlToTv(tv: TvDevice, videoUrl: String) {
-        webStatusText.text = "状态：已获取视频地址，发送中..."
-        Log.i(TAG, "send cast url=$videoUrl tv=${tv.host}:${tv.port}")
+        webStatusText.text = "状态：发送中..."
         thread {
-            val (ok, msg) = CastClient.sendCast(tv, videoUrl)
+            val (ok, msg) = unifiedSender.send(tv, videoUrl)
             runOnUiThread {
-                webStatusText.text = if (ok) {
-                    "状态：发送成功"
-                } else {
-                    "状态：发送失败 ($msg)"
-                }
+                webStatusText.text = if (ok) "状态：发送成功" else "状态：发送失败 ($msg)"
             }
             Log.i(TAG, "send result ok=$ok msg=$msg")
+        }
+    }
+
+    private fun controlPlayback(action: PlaybackAction) {
+        val tv = targetTv
+        if (tv == null) {
+            webStatusText.text = "状态：请先绑定设备"
+            return
+        }
+        webStatusText.text = "状态：控制中..."
+        thread {
+            val (ok, msg) = unifiedPlaybackController.control(tv, action)
+            runOnUiThread {
+                webStatusText.text = if (ok) {
+                    "状态：控制成功 (${action.name})"
+                } else {
+                    val suffix = if (tv.protocol == ProtocolType.DLNA) "（该电视可能不支持此控制）" else ""
+                    "状态：控制失败 ($msg)$suffix"
+                }
+            }
         }
     }
 
@@ -362,117 +375,35 @@ class WebCastActivity : AppCompatActivity() {
         private const val TAG = "WebCast"
 
         const val EXTRA_INITIAL_URL = "extra_initial_url"
+        const val EXTRA_TV_ID = "extra_tv_id"
         const val EXTRA_TV_NAME = "extra_tv_name"
         const val EXTRA_TV_HOST = "extra_tv_host"
         const val EXTRA_TV_PORT = "extra_tv_port"
+        const val EXTRA_TV_PROTOCOL = "extra_tv_protocol"
+        const val EXTRA_TV_LOCATION = "extra_tv_location"
+        const val EXTRA_TV_CONTROL_URL = "extra_tv_control_url"
 
         private const val JS_FIND_VIDEO_URL = """
             (function() {
-                var collectVideos = function(doc) {
-                    try {
-                        return Array.prototype.slice.call(doc.querySelectorAll('video'));
-                    } catch (e) {
-                        return [];
-                    }
-                };
-
-                var videos = collectVideos(document);
-                var iframes = Array.prototype.slice.call(document.querySelectorAll('iframe'));
-                var iframeVideos = [];
-                iframes.forEach(function(f) {
-                    try {
-                        if (f.contentDocument) {
-                            iframeVideos = iframeVideos.concat(collectVideos(f.contentDocument));
-                        }
-                    } catch (e) {
-                    }
-                });
-                videos = videos.concat(iframeVideos);
-
-                var details = videos.slice(0, 5).map(function(v, idx) {
-                    var sourceNode = v.querySelector('source');
-                    return {
-                        index: idx,
-                        paused: !!v.paused,
-                        ended: !!v.ended,
-                        readyState: v.readyState || 0,
-                        currentSrc: v.currentSrc || '',
-                        src: v.src || '',
-                        sourceSrc: sourceNode ? (sourceNode.src || '') : ''
-                    };
-                });
-
+                var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
                 if (!videos || videos.length === 0) {
-                    return JSON.stringify({
-                        found: false,
-                        url: '',
-                        reason: 'no_video_element',
-                        videoCount: 0,
-                        playingCount: 0,
-                        details: details
-                    });
+                    return JSON.stringify({ found: false, url: '', reason: 'no_video_element' });
                 }
-
-                var pickUrl = function(v) {
-                    if (!v) return '';
+                var pick = function(v) {
                     var sourceNode = v.querySelector('source');
                     return v.currentSrc || v.src || (sourceNode ? (sourceNode.src || '') : '') || '';
                 };
-
-                var playingVideos = videos.filter(function(v){
-                    return !v.paused && !v.ended && !!pickUrl(v);
-                });
-                var playableVideos = videos.filter(function(v){
-                    return !!pickUrl(v);
-                });
-
-                var target = playingVideos[0] || playableVideos[0] || null;
-                var targetUrl = pickUrl(target);
-
-                return JSON.stringify({
-                    found: !!targetUrl,
-                    url: targetUrl,
-                    reason: targetUrl ? 'ok' : 'url_empty',
-                    videoCount: videos.length,
-                    playingCount: playingVideos.length,
-                    details: details
-                });
+                var playing = videos.find(function(v){ return !v.paused && !v.ended && !!pick(v); });
+                var target = playing || videos.find(function(v){ return !!pick(v); });
+                var url = target ? pick(target) : '';
+                return JSON.stringify({ found: !!url, url: url, reason: url ? 'ok' : 'url_empty' });
             })();
         """
 
         private const val JS_HAS_PLAYING_VIDEO = """
             (function() {
-                var collectVideos = function(doc) {
-                    try {
-                        return Array.prototype.slice.call(doc.querySelectorAll('video'));
-                    } catch (e) {
-                        return [];
-                    }
-                };
-                var videos = collectVideos(document);
-                var iframes = Array.prototype.slice.call(document.querySelectorAll('iframe'));
-                iframes.forEach(function(f) {
-                    try {
-                        if (f.contentDocument) {
-                            videos = videos.concat(collectVideos(f.contentDocument));
-                        }
-                    } catch (e) {
-                    }
-                });
-
-                var pickUrl = function(v) {
-                    if (!v) return '';
-                    var sourceNode = v.querySelector('source');
-                    return v.currentSrc || v.src || (sourceNode ? (sourceNode.src || '') : '') || '';
-                };
-                var playingCount = videos.filter(function(v){
-                    return !v.paused && !v.ended && !!pickUrl(v);
-                }).length;
-                return JSON.stringify({
-                    hasPlaying: playingCount > 0,
-                    videoCount: videos.length,
-                    playingCount: playingCount
-                });
+                var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
+                return JSON.stringify({ hasPlaying: videos.some(function(v){ return !v.paused && !v.ended; }) });
             })();
         """
     }
